@@ -25,7 +25,7 @@
 #ifdef ESP32
   #include <SPIFFS.h>
 #endif
-#define VERSION "v0.46 (ESP8266)"
+#define VERSION "v0.46-dr3 (ESP8266)"
 
 // ================================
 //  User Defined values and options
@@ -104,6 +104,10 @@ bool mqttEnabled = false;         //Will be enabled/disabled depending on whethe
 bool mqttConnected = false;       //Will be enabled if defined and successful connnection made.  This var should be checked upon any MQTT action.
 bool prevCarStatus = false;       //v0.44 for forcing MQTT update on state change
 bool forceMQTTUpdate = false;     //v0.44 for forcing MQTT update on state change
+uint32_t lastMqttRetry = 0;       //dr1: non-blocking MQTT reconnect timer
+uint32_t wifiLostAt = 0;          //dr1: when WiFi was first seen down (0 = connected)
+uint32_t loopStart = 0;           //dr3: diagnostics - longest loop pass (excluding final delay)
+uint32_t loopMaxMs = 0;
 
 //Variables for creating unique entity IDs and topics (HA discovery)
 byte macAddr[6];               //Device MAC address (array is in reverse order)
@@ -251,6 +255,17 @@ void defineColors() {
 //===============================
 // Web pages and handlers
 //===============================
+// Send a page with a long write timeout. On lossy WiFi a lost segment's retransmit can exceed
+// the web server's fixed 5s per-chunk timeout, which silently truncates the page.
+// server.client() returns a copy, so the timeout is set on (and the body written through) that copy.
+void sendPage(const String& page) {
+  WiFiClient c = server.client();
+  c.setTimeout(20000);
+  server.setContentLength(page.length());
+  server.send(200, "text/html", "");
+  c.write(page.c_str(), page.length());
+}
+
 // Main Settings page
 // Root / Main Settings page handler
 void handleRoot() {
@@ -276,6 +291,7 @@ void handleRoot() {
   </head>\
   <body>\
     <h1>Controller Settings (VAR_DEVICE_NAME)</h1><br>\
+    VAR_WIFI_INFO<br><br>\
     Changes made here will be used <b><i>until the controller is restarted</i></b>, unless the box to save the settings as new boot defaults is checked.<br><br>\
     To test settings, leave the box unchecked and click 'Update'. Once you have settings you'd like to keep, check the box and click 'Update' to write the settings as the new boot defaults.<br><br>\
     If you want to change wifi settings or the device name, you must use the 'Reset All' command.<br><br>\
@@ -531,7 +547,12 @@ void handleRoot() {
 </html>";
   mainPage.replace("VAR_DEVICE_NAME", deviceName); 
   mainPage.replace("VAR_CURRRENT_VER", VERSION);
-  server.send(200, "text/html", mainPage);
+  mainPage.replace("VAR_WIFI_INFO", "WiFi: " + String(WiFi.RSSI()) + " dBm, AP " + WiFi.BSSIDstr() + ", ch " + String(WiFi.channel())
+    + " | MQTT: " + (client.connected() ? "connected" : "disconnected (state " + String(client.state()) + ")")
+    + " | PHY: 11" + String("?bgn"[WiFi.getPhyMode() & 3])
+    + " | Sleep: " + String(WiFi.getSleepMode()) + " | Max loop: " + String(loopMaxMs) + " ms"
+    + " | Uptime: " + String(millis() / 60000) + " min");
+  sendPage(mainPage);
 }
 
 // Settings submit handler - Settings results
@@ -689,7 +710,7 @@ void handleForm() {
     message += baseIP;
     message += "\">Return to settings</a><br>";
     message += "</body></html>";
-    server.send(200, "text/html", message);
+    sendPage(message);
     delay(1000);
     if (saveSettings == "save") {
       updateSettings(true);
@@ -731,7 +752,7 @@ void handleUpdate() {
   updFirmware += baseIP;
   updFirmware += "\">Return to settings</a><br>";
   updFirmware += "</body></html>";
-  server.send(200, "text/html", updFirmware); 
+  sendPage(updFirmware);
 }
 
 void updateSettings(bool saveBoot) {
@@ -899,7 +920,7 @@ void handleReset() {
       You will need to reenter all of your settings for the system as all values will be reset to original defaults<br><br>\
       <b>This page will NOT automatically reload or refresh</b>\
       </body></html>";
-    server.send(200, "text/html", resetMsg);
+    sendPage(resetMsg);
     delay(1000);
     SPIFFS.begin();
     SPIFFS.format();
@@ -926,7 +947,7 @@ void handleRestart() {
     restartMsg += baseIP;
     restartMsg += "\">Return to settings</a><br>";
     restartMsg += "</body></html>";
-    server.send(200, "text/html", restartMsg);
+    sendPage(restartMsg);
     delay(1000);
     ESP.restart();
 }
@@ -976,7 +997,7 @@ void handleDiscovery() {
   discMsg += "\">Return to settings</a><br>";
   discMsg += "</body></html>";
   discMsg.replace("VAR_DEVICE_NAME", deviceName);
-  server.send(200, "text/html", discMsg); 
+  sendPage(discMsg);
 }
 
 void enableDiscovery() {
@@ -1054,7 +1075,7 @@ void enableDiscovery() {
   discMsg += "\">Return to settings</a><br>";
   discMsg += "</body></html>";
   discMsg.replace("VAR_DEVICE_NAME", deviceName);
-  server.send(200, "text/html", discMsg); 
+  sendPage(discMsg);
 
 }
 
@@ -1128,7 +1149,7 @@ void disableDiscovery() {
   discMsg += "\">Return to settings</a><br>";
   discMsg += "</body></html>";
   discMsg.replace("VAR_DEVICE_NAME", deviceName);
-  server.send(200, "text/html", discMsg); 
+  sendPage(discMsg);
 
 }
 
@@ -1155,6 +1176,8 @@ bool setup_mqtt() {
   
   client.setServer(myserver, mqttPort);
   client.setBufferSize(512); 
+  client.setKeepAlive(60);    //dr1: tolerate brief packet loss (default 15s)
+  client.setSocketTimeout(5); //dr1: bound how long a failed connect blocks the loop
   client.setCallback(callback);
   #if defined(SERIAL_DEBUG) && (SERIAL_DEBUG == 1)
     Serial.print("Connecting to MQTT broker.");
@@ -1189,37 +1212,13 @@ bool setup_mqtt() {
 }
 
 void reconnect() {
-  int retries = 0;
-  while (!client.connected()) {
-    if(retries < 150)
-    {
-      #if defined(SERIAL_DEBUG) && (SERIAL_DEBUG == 1)
-        Serial.print("Attempting MQTT connection...");
-      #endif
-      if (client.connect(mqttClient.c_str(), mqttUser.c_str(), mqttPW.c_str())) 
-      {
-        #if defined(SERIAL_DEBUG) && (SERIAL_DEBUG == 1)
-          Serial.println("connected");
-        #endif
-        // ... and resubscribe
-        client.subscribe(("cmnd/" + mqttTopicSub + "/#").c_str());
-      } 
-      else 
-      {
-        #if defined(SERIAL_DEBUG) && (SERIAL_DEBUG == 1)
-          Serial.print("failed, rc=");
-          Serial.print(client.state());
-          Serial.println(" try again in 5 seconds");
-        #endif
-        retries++;
-        // Wait 5 seconds before retrying
-        delay(5000);
-      }
-    }
-    if ((retries > 149) && (mqttEnabled))
-    {
-    ESP.restart();
-    }
+  //dr1: one attempt every 5s so the loop (web, OTA, LEDs) keeps running.
+  //Was a blocking loop of up to 150 x 5s retries followed by ESP.restart().
+  if (client.connected() || WiFi.status() != WL_CONNECTED) return;
+  if (millis() - lastMqttRetry < 5000) return;
+  lastMqttRetry = millis();
+  if (client.connect(mqttClient.c_str(), mqttUser.c_str(), mqttPW.c_str())) {
+    client.subscribe(("cmnd/" + mqttTopicSub + "/#").c_str());
   }
 }
 
@@ -1259,6 +1258,7 @@ bool reconnect_soft() {
        return false;
     }
   }
+  return true;
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
@@ -1432,6 +1432,11 @@ void setup() {
 
   //if you get here you have connected to the WiFi
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.setAutoReconnect(true);
+  //dr2: 802.11g + lower TX power. 11n on the ESP8266 drops packets with some modern APs,
+  //and full power (20.5 dBm) is unnecessary near an AP and adds supply current spikes.
+  WiFi.setPhyMode(WIFI_PHY_MODE_11G);
+  WiFi.setOutputPower(17.0);
   WiFi.hostname(wifiHostName.c_str());
   #if defined(SERIAL_DEBUG) && (SERIAL_DEBUG == 1)
     Serial.println("connected to your wifi...yay!");
@@ -1514,6 +1519,18 @@ void setup() {
   server.on("/update", handleUpdate);
 
   server.on("/restart", handleRestart);
+
+  //dr2: runtime WiFi tuning for testing, e.g. /wifitune?phy=n&power=20.5 (not saved; reboot restores defaults)
+  server.on("/wifitune", []() {
+    if (server.arg("phy") == "b") WiFi.setPhyMode(WIFI_PHY_MODE_11B);
+    if (server.arg("phy") == "g") WiFi.setPhyMode(WIFI_PHY_MODE_11G);
+    if (server.arg("phy") == "n") WiFi.setPhyMode(WIFI_PHY_MODE_11N);
+    if (server.hasArg("power")) WiFi.setOutputPower(constrain(server.arg("power").toFloat(), 0.0f, 20.5f));
+    const char* modes[] = {"?", "b", "g", "n"};
+    server.send(200, "text/plain", String("phy=") + modes[WiFi.getPhyMode() & 3] + " rssi=" + String(WiFi.RSSI())
+      + " sleep=" + String(WiFi.getSleepMode()) + " maxloop=" + String(loopMaxMs) + "ms");
+    if (server.hasArg("resetmax")) loopMaxMs = 0;
+  });
 
   server.on("/reset", handleReset);
 
@@ -1607,6 +1624,7 @@ void setup() {
 //   MAIN LOOP
 // =============================
 void loop() {
+  loopStart = millis();
   //Handle OTA updates when OTA flag set via HTML call to http://ip_address/otaupdate
   if (ota_flag) {
     updateOTA();  //Show update on LED strip
@@ -1619,6 +1637,18 @@ void loop() {
     ota_flag = false;
     updateSleepMode();
   }
+  //dr1: if WiFi stays down for 60s, kick a reconnect (also re-picks the nearest AP)
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiLostAt == 0) {
+      wifiLostAt = millis();
+    } else if (millis() - wifiLostAt > 60000) {
+      WiFi.reconnect();
+      wifiLostAt = millis();
+    }
+  } else {
+    wifiLostAt = 0;
+  }
+
   //Handle any web calls
   server.handleClient();
 
@@ -1764,6 +1794,7 @@ void loop() {
       client.publish(("stat/" + mqttTopicPub + "/parkdistance").c_str(), outMsg, true);
     }
   }
+  if (millis() - loopStart > loopMaxMs) loopMaxMs = millis() - loopStart;
   delay(200);
 }
 

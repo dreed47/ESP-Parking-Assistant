@@ -255,6 +255,30 @@ void defineColors() {
 //===============================
 // Web pages and handlers
 //===============================
+// Shared page style: compact card grid, follows the browser's light/dark setting
+const char PAGE_CSS[] PROGMEM = R"(<style>
+:root{--bg:#f3f4f6;--card:#fff;--fg:#1f2937;--mut:#6b7280;--bd:#d1d5db;--acc:#2563eb;--ok:#15803d;--bad:#dc2626}
+@media(prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--fg:#e5e7eb;--mut:#9ca3af;--bd:#374151;--acc:#60a5fa;--ok:#4ade80;--bad:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;padding:12px 16px;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:12px}
+h1{font-size:20px;margin:0;flex:1 1 auto}
+.chip{padding:3px 10px;border-radius:12px;background:var(--card);border:1px solid var(--bd);font-size:12px;white-space:nowrap}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;align-items:start}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px 14px}
+h2{font-size:15px;margin:0 0 6px}
+.r{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0}
+.r label{color:var(--mut)}
+input,select,button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--bd);border-radius:5px;padding:4px 6px}
+input[type=number]{width:84px}input[type=text],input[type=password]{width:150px}select{width:120px}
+.ip input{width:54px}
+details{margin-top:8px;font-size:12px;color:var(--mut)}summary{cursor:pointer;color:var(--acc)}details p{margin:4px 0}
+button{cursor:pointer;padding:6px 12px}.pri{background:var(--acc);color:#fff;border:0}.dng{border-color:var(--bad);color:var(--bad)}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;margin-top:12px}.bar span{flex:1;color:var(--mut);font-size:12px}
+a{color:var(--acc)}
+</style>)";
+
 // Send a page with a long write timeout. On lossy WiFi a lost segment's retransmit can exceed
 // the web server's fixed 5s per-chunk timeout, which silently truncates the page.
 // server.client() returns a copy, so the timeout is set on (and the body written through) that copy.
@@ -266,6 +290,21 @@ void sendPage(const String& page) {
   c.write(page.c_str(), page.length());
 }
 
+// One labelled number input row on the settings page
+String numRow(const String& label, const char* name, int mn, int mx, const char* step, const String& val, const char* unit = "") {
+  return "<div class=r><label for=" + String(name) + ">" + label + (*unit ? String(" (") + unit + ")" : "") + "</label><input type=number id=" + name
+    + " name=" + name + " min=" + mn + " max=" + mx + " step=" + step + " value=\"" + val + "\"></div>";
+}
+
+// One labelled dropdown row; opts/count is the option list, sel the selected index
+String selRow(const char* label, const char* name, String* opts, int count, int sel, bool valueIsName = false) {
+  String s = "<div class=r><label for=" + String(name) + ">" + label + "</label><select id=" + name + " name=" + name + ">";
+  for (int i = 0; i < count; i++) {
+    s += "<option value=\"" + (valueIsName ? opts[i] : String(i)) + "\"" + (i == sel ? " selected" : "") + ">" + opts[i] + "</option>";
+  }
+  return s + "</select></div>";
+}
+
 // Main Settings page
 // Root / Main Settings page handler
 void handleRoot() {
@@ -274,288 +313,108 @@ void handleRoot() {
   uint16_t intStartDistance = ((startDistance / 25.4) + 0.5);
   uint16_t intParkDistance = ((parkDistance / 25.4) + 0.5);
   uint16_t intBackupDistance = ((backupDistance / 25.4) + 0.5);
-  //If using centimeters, convert from millimeters
+  //If using millimeters, show raw values
   if (uomDistance) {
     intWakeDistance = wakeDistance;
     intStartDistance = startDistance;
     intParkDistance = parkDistance;
     intBackupDistance = backupDistance;
   }
-  String mainPage = "<html>\
-  <head>\
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\
-    <title>Parking Assistant - Main</title>\
-    <style>\
-      body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }\
-    </style>\
-  </head>\
-  <body>\
-    <h1>Controller Settings (VAR_DEVICE_NAME)</h1><br>\
-    VAR_WIFI_INFO<br><br>\
-    Changes made here will be used <b><i>until the controller is restarted</i></b>, unless the box to save the settings as new boot defaults is checked.<br><br>\
-    To test settings, leave the box unchecked and click 'Update'. Once you have settings you'd like to keep, check the box and click 'Update' to write the settings as the new boot defaults.<br><br>\
-    If you want to change wifi settings or the device name, you must use the 'Reset All' command.<br><br>\
-    <form method=\"post\" enctype=\"application/x-www-form-urlencoded\" action=\"/postform/\">\
-      <table>\
-      <tr>\
-      <td><label for=\"leds\">Number of Pixels (1-100):</label></td>\
-      <td><input type=\"number\" min=\"1\" max=\"100\" step=\"1\" name=\"leds\" value=\"";
-  mainPage += String(numLEDs);    
-  mainPage += "\"></td></tr>\
-      <tr>\
-      <td><label for=\"activebrightness\">Active LED Brightness (0-255):</label></td>\
-      <td><input type=\"number\" min=\"0\" max=\"255\" step=\"1\" name=\"activebrightness\" value=\"";
-  mainPage += String(activeBrightness);
-  mainPage += "\"></td></tr>\
-      <tr>\
-      <td><label for=\"sleepbrightness\">Standby LED Brightness (0-255) - set to zero to disable:</label></td>\
-      <td><input type=\"number\" min=\"0\" max=\"255\" step=\"1\" name=\"sleepbrightness\" value=\"";
-  mainPage += String(sleepBrightness);
-  mainPage += "\"></td>\
-      </tr></table><br>\
-      <b><u>LED Active Times</b></u>:<br>\
-      This indicates how long the LEDs remain active when going from a no-car to car-detected (park) state or from a car-detected to no-car (exit)s state.<br><br>\
-      <table>\
-      <tr>\
-      <td><label for=\"ledparktime\">Active Park Time (seconds - 300 max):</label></td>\
-      <td><input type=\"number\" min=\"0\" max=\"300\" step=\"1\" name=\"ledparktime\" value=\"";
-  mainPage += String(maxOperationTimePark);
-  mainPage += "\"></td>\
-      </tr>\
-      <tr>\
-      <td><label for=\"ledexittime\">Active Exit Time (seconds - 300 max):</label></td>\
-      <td><input type=\"number\" min=\"0\" max=\"300\" step=\"1\" name=\"ledexittime\" value=\"";
-  mainPage += String(maxOperationTimeExit);
-  mainPage += "\"></td>\
-      </tr>\
-      </table><br>\
-      <b><u>Parking Distances</u></b>:<br>\
-      These values, in inches, specify when the LED strip wakes (Wake distance), when the countdown starts (Active distance), when the car is in the desired parked position (Parked distance) or when it has pulled too far forward and should back up (Backup distance).<br><br>\
-      See the <a href=\"https://github.com/Resinchem/ESP-Parking-Assistant/wiki/04-Using-the-Web-Interface\">Github wiki</a> for more information on setting these values for your situation. \
-      If using inches, you may enter decimal values (e.g. 27.5\") and these will be converted to millimeters in the code.  Values should decrease from Wake through Backup... maximum value is 192 inches (4980 mm) and minimum value is 12 inches (305 mm).<br><br>\
-      <table>\
-      <tr>\
-      <td>Show distances in:</td>\
-      <td><input type=\"radio\" id=\"inches\" name=\"uom\" value=\"0\"";
-      if (!uomDistance) {
-        mainPage += " checked=\"checked\">";
-      } else {
-        mainPage += ">";
-      }
-  mainPage += "<label for=\"inches\">Inches</label>&nbsp;&nbsp;\
-      <input type=\"radio\" id=\"mm\" name=\"uom\" value=\"1\"";
-      if (uomDistance) {
-        mainPage += " checked=\"checked\">";
-      } else {
-        mainPage += ">";        
-      }
-  mainPage += "<label for=\"mm\">Millimeters</label>&nbsp;&nbsp;\      
-      (you must update settings to switch units)</td></tr>\
-      <tr>\
-      <td><label for=\"wakedistance\">Wake Distance:</label></td>";
+  uint32_t upMin = millis() / 60000;
+  int rssi = WiFi.RSSI();
+  int effectSel = 0;
+  for (int i = 0; i < numberOfEffects; i++) if (Effects[i] == ledEffect_m1) effectSel = i;
+  //Distance inputs: mm are whole numbers 305-4980, inches allow decimals 12-192
+  int dMin = uomDistance ? 305 : 12;
+  int dMax = uomDistance ? 4980 : 192;
+  const char* dStep = uomDistance ? "1" : "0.1";
+  const char* dUnit = uomDistance ? "mm" : "in";
 
-  if (uomDistance) {
-    mainPage += "<td><input type=\"number\" min=\"305\" max=\"4980\" step=\"1\" name=\"wakedistance\" value=\"";   
-    mainPage += String(intWakeDistance); 
-    mainPage += "\"> mm</td>";
+  String p;
+  p.reserve(9000);
+  p = "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>" + deviceName + " - Parking Assistant</title>";
+  p += FPSTR(PAGE_CSS);
+  p += "</head><body><header><h1>Parking Assistant <span style=\"color:var(--mut);font-weight:normal\">" + deviceName + "</span></h1>";
+  p += "<span class=chip>WiFi <b class=" + String(rssi > -70 ? "ok" : "bad") + ">" + rssi + " dBm</b></span>";
+  if (!mqttEnabled) {
+    p += "<span class=chip>MQTT off</span>";
+  } else if (client.connected()) {
+    p += "<span class=chip>MQTT <b class=ok>connected</b></span>";
   } else {
-    mainPage += "<td><input type=\"number\" min=\"12\" max=\"192\" step=\"0.1\" name=\"wakedistance\" value=\"";
-    mainPage += String(intWakeDistance); 
-    mainPage += "\"> inches</td>";
+    p += "<span class=chip>MQTT <b class=bad>disconnected (" + String(client.state()) + ")</b></span>";
   }
+  p += "<span class=chip>Up " + String(upMin / 1440) + "d " + String(upMin / 60 % 24) + "h " + String(upMin % 60) + "m</span>";
+  p += "<span class=chip>" VERSION "</span></header>";
 
-  mainPage += "</tr>\
-      <tr>\
-      <td><label for=\"activedistance\">Active Distance:</label></td>";
-  if (uomDistance) {
-    mainPage += "<td><input type=\"number\" min=\"305\" max=\"4980\" step=\"1\" name=\"activedistance\" value=\"";
-    mainPage += String(intStartDistance);     
-    mainPage += "\"> mm</td>";
-  } else {
-    mainPage += "<td><input type=\"number\" min=\"12\" max=\"192\" step=\"0.1\" name=\"activedistance\" value=\"";
-    mainPage += String(intStartDistance);     
-    mainPage += "\"> inches</td>";
+  p += "<form method=post action=\"/postform/\"><div class=grid>";
+
+  //LED strip
+  p += "<div class=card><h2>LED strip</h2>";
+  p += numRow("Number of pixels", "leds", 1, 100, "1", String(numLEDs));
+  p += numRow("Active brightness", "activebrightness", 0, 255, "1", String(activeBrightness));
+  p += numRow("Standby brightness", "sleepbrightness", 0, 255, "1", String(sleepBrightness));
+  p += numRow("On after parking", "ledparktime", 0, 300, "1", String(maxOperationTimePark), "s");
+  p += numRow("On after exit", "ledexittime", 0, 300, "1", String(maxOperationTimeExit), "s");
+  p += "<details><summary>Help</summary><p>Brightness is 0-255. Set standby brightness to 0 to turn the strip fully off when idle.</p>"
+       "<p>The on-times (max 300 s) are how long the LEDs stay lit after a car arrives (park) or leaves (exit).</p></details></div>";
+
+  //Distances
+  p += "<div class=card><h2>Parking distances</h2>";
+  p += "<div class=r><label>Units</label><span><label><input type=radio name=uom value=0" + String(uomDistance ? "" : " checked") + "> in</label> "
+       "<label><input type=radio name=uom value=1" + String(uomDistance ? " checked" : "") + "> mm</label></span></div>";
+  p += numRow("Wake", "wakedistance", dMin, dMax, dStep, String(intWakeDistance), dUnit);
+  p += numRow("Active (countdown)", "activedistance", dMin, dMax, dStep, String(intStartDistance), dUnit);
+  p += numRow("Parked", "parkeddistance", dMin, dMax, dStep, String(intParkDistance), dUnit);
+  p += numRow("Back up", "backupdistance", dMin, dMax, dStep, String(intBackupDistance), dUnit);
+  p += "<details><summary>Help</summary><p>Distances from the sensor: the strip wakes at <b>Wake</b>, counts down from <b>Active</b>, "
+       "shows parked at <b>Parked</b>, and flashes to back up at <b>Back up</b>. Values must decrease from Wake to Back up, 12-192 in (305-4980 mm).</p>"
+       "<p>Changing units converts the values when you apply. "
+       "<a href=\"https://github.com/Resinchem/ESP-Parking-Assistant/wiki/04-Using-the-Web-Interface\">Wiki</a></p></details></div>";
+
+  //Colors and effect
+  p += "<div class=card><h2>Colors &amp; effect</h2>";
+  p += selRow("Wake", "wakecolor", WebColors, numberOfColors, webColorWake);
+  p += selRow("Active", "activecolor", WebColors, numberOfColors, webColorActive);
+  p += selRow("Parked", "parkedcolor", WebColors, numberOfColors, webColorParked);
+  p += selRow("Back up (flashing)", "backupcolor", WebColors, numberOfColors, webColorBackup);
+  p += selRow("Standby", "standbycolor", WebColors, numberOfColors, webColorStandby);
+  p += selRow("Effect", "effect1", Effects, numberOfEffects, effectSel, true);
+  p += "<details><summary>Help</summary><p>Colors can repeat, but then changes between stages are harder to see with some effects.</p></details></div>";
+
+  //MQTT
+  p += "<div class=card><h2>MQTT</h2>";
+  p += "<div class=r><label for=mqttaddr1>Broker IP</label><span class=ip>";
+  int ip[4] = {mqttAddr_1, mqttAddr_2, mqttAddr_3, mqttAddr_4};
+  for (int i = 0; i < 4; i++) {
+    p += String(i ? "." : "") + "<input type=number id=mqttaddr" + (i + 1) + " name=mqttaddr" + (i + 1) + " min=0 max=255 step=1 value=\"" + ip[i] + "\">";
   }
-  
-  mainPage += "</tr>\
-      <tr>\
-      <td><label for=\"parkeddistance\">Parked Distance:</label></td>";
-  if (uomDistance) {
-    mainPage += "<td><input type=\"number\" min=\"305\" max=\"4980\" step=\"1\" name=\"parkeddistance\" value=\"";
-    mainPage += String(intParkDistance);
-    mainPage += "\"> mm</td>";
-  } else {
-    mainPage += "<td><input type=\"number\" min=\"12\" max=\"192\" step=\"0.1\" name=\"parkeddistance\" value=\"";
-    mainPage += String(intParkDistance);
-    mainPage += "\"> inches</td>";
-  }
+  p += "</span></div>";
+  p += numRow("Port", "mqttport", 0, 65535, "1", String(mqttPort));
+  p += "<div class=r><label for=mqttuser>User</label><input type=text id=mqttuser name=mqttuser maxlength=64 value=\"" + mqttUser + "\"></div>";
+  p += "<div class=r><label for=mqttpw>Password</label><input type=password id=mqttpw name=mqttpw maxlength=64 value=\"" + mqttPW + "\"></div>";
+  p += "<div class=r><label for=mqtttopic>Topic</label><span>stat/<input type=text id=mqtttopic name=mqtttopic maxlength=16 value=\"" + mqttTopicPub + "\"></span></div>";
+  p += numRow("Telemetry period", "mqttperiod", 60, 600, "1", String(mqttTelePeriod), "s");
+  p += "<details><summary>Help</summary><p>Only fill this in if you already run an MQTT broker. Set the IP to 0.0.0.0 to disable MQTT.</p>"
+       "<p>MQTT changes only take effect with <b>Save &amp; reboot</b>. On connect, \"connected\" is published (retained) to stat/<i>topic</i>/mqtt. "
+       "Topic: 16 letters/numbers max, no spaces or symbols. Telemetry period: 60-600 s.</p>"
+       "<p><a href=\"/discovery\">Home Assistant MQTT discovery</a> (beta)</p></details></div>";
 
-  mainPage += "</tr>\
-      <tr>\
-      <td><label for=\"backupistance\">Backup Distance:</label></td>";
-  if (uomDistance) {
-    mainPage += "<td><input type=\"number\" min=\"305\" max=\"4980\" step=\"1\" name=\"backupdistance\" value=\"";
-    mainPage += String(intBackupDistance);
-    mainPage += "\"> mm</td>";
-  } else {
-    mainPage += "<td><input type=\"number\" min=\"12\" max=\"192\" step=\"0.1\" name=\"backupdistance\" value=\"";
-    mainPage += String(intBackupDistance);
-    mainPage += "\"> inches</td>";
-  }
+  //Controller
+  p += "<div class=card><h2>Controller</h2><div class=bar style=\"justify-content:flex-start;margin:0\">"
+       "<button type=button onclick=\"confirm('Restart the controller?')&&(location='/restart')\">Restart</button>"
+       "<button type=button onclick=\"location='/update'\">Firmware update</button>"
+       "<button type=button class=dng onclick=\"confirm('Erase ALL settings, including WiFi? You will have to set the controller up again.')&&(location='/reset')\">Reset all</button></div>";
+  p += "<details><summary>Help</summary><p><b>Restart</b> reboots and reloads the saved boot settings. <b>Reset all</b> erases everything, including WiFi; "
+       "use it to change WiFi or the device name.</p></details>";
+  p += "<details><summary>Diagnostics</summary><p>AP " + WiFi.BSSIDstr() + ", channel " + String(WiFi.channel()) + ", 802.11" + String("?bgn"[WiFi.getPhyMode() & 3])
+       + ", sleep mode " + String(WiFi.getSleepMode()) + "<br>IP " + baseIP + ", MAC " + strMacAddr
+       + "<br>Longest loop " + String(loopMaxMs) + " ms, free heap " + String(ESP.getFreeHeap()) + " bytes</p></details></div>";
 
-  mainPage += "</tr>\
-      </table><br>\
-      <b><u>LED Colors</b></u>:<br>\
-      Select LED color to be used for each stage of the parking process.  Colors may be duplicated, but transition from one state to another may not be obvious based on effect chosen.<br><br>\
-      <table>\
-      <tr>\
-      <td><label for=\"wakecolor\">Wake Color:</label></td>\
-      <td><select name=\"wakecolor\">";
-      for (byte i = 0; i < numberOfColors; i ++) {
-        mainPage += "<option value=\"" + String(i) + "\"";
-        if (i == webColorWake) {
-          mainPage += " selected";
-        }
-        mainPage += ">" + WebColors[i] + "</option>";
-      }
-  mainPage += "\"></td>\
-      <tr>\
-      <td><label for=\"activecolor\">Active Color:</label></td>\
-      <td><select name=\"activecolor\">";
-      for (byte i = 0; i < numberOfColors; i ++) {
-        mainPage += "<option value=\"" + String(i) + "\"";
-        if (i == webColorActive) {
-          mainPage += " selected";
-        }
-        mainPage += ">" + WebColors[i] + "</option>";
-      }
-  mainPage += "\"></td>\
-      <tr>\
-      <td><label for=\"parkedcolor\">Parked Color:</label></td>\
-      <td><select name=\"parkedcolor\">";
-      for (byte i = 0; i < numberOfColors; i ++) {
-        mainPage += "<option value=\"" + String(i) + "\"";
-        if (i == webColorParked) {
-          mainPage += " selected";
-        }
-        mainPage += ">" + WebColors[i] + "</option>";
-      }
-  mainPage += "\"></td>\
-      <tr>\
-      <td><label for=\"backupcolor\">Backup Color (flashing):</label></td>\
-      <td><select name=\"backupcolor\">";
-      for (byte i = 0; i < numberOfColors; i ++) {
-        mainPage += "<option value=\"" + String(i) + "\"";
-        if (i == webColorBackup) {
-          mainPage += " selected";
-        }
-        mainPage += ">" + WebColors[i] + "</option>";
-      }
-  mainPage += "\"></td>\
-      <tr>\
-      <td><label for=\"standbycolor\">Standby Color:</label></td>\
-      <td><select name=\"standbycolor\">";
-      for (byte i = 0; i < numberOfColors; i ++) {
-        mainPage += "<option value=\"" + String(i) + "\"";
-        if (i == webColorStandby) {
-          mainPage += " selected";
-        }
-        mainPage += ">" + WebColors[i] + "</option>";
-      }
-  mainPage += "\"></td>\
-      </tr>\
-      <tr>\
-      <td><label for=\"effect\">Effect:</label></td>\
-      <td><select name=\"effect1\">";
- // Dropdown Effects boxes
- for (byte i = 0; i < numberOfEffects; i++) {
-   mainPage += "<option value=\"" + Effects[i] + "\"";
-   if (Effects[i] == ledEffect_m1) {
-     mainPage += " selected";
-   }
-   mainPage += ">" + Effects[i] + "</option>";
- }
-
- //MQTT Section
-  mainPage += "</td></tr>\
-      </table><br>\
-      <b><u>MQTT Settings</u></b>:<br>\
-      ONLY enter this information if you already have an MQTT broker configured. <u><i>To disable or remove MQTT functionality, set the IP address to 0.0.0.0</i></u><br>\
-      Any changes to MQTT require that you check the box to update boot settings below, which will reboot the controller.  If a successful connection to your MQTT broker is made, \
-      a retained message of \"connected\" will be published to the topic \"stat/your_topic/mqtt\".<br><br>";
-  mainPage += "<table>\
-      <tr>\
-      <td><label for=\"mqttaddr1\">Broker IP Address:</label></td>\
-      <td><input type=\"number\" min=\"0\" max=\"255\" step=\"1\" name=\"mqttaddr1\" style=\"width: 50px\;\" value=\"";
-  mainPage += String(mqttAddr_1);
-  mainPage += "\">.<input type=\"number\" min=\"0\" max=\"255\" step=\"1\" name=\"mqttaddr2\" style=\"width: 50px\;\" value=\"";  
-  mainPage += String(mqttAddr_2);
-  mainPage += "\">.<input type=\"number\" min=\"0\" max=\"255\" step=\"1\" name=\"mqttaddr3\" style=\"width: 50px\;\" value=\"";  
-  mainPage += String(mqttAddr_3);
-  mainPage += "\">.<input type=\"number\" min=\"0\" max=\"255\" step=\"1\" name=\"mqttaddr4\" style=\"width: 50px\;\" value=\"";  
-  mainPage += String(mqttAddr_4);
-  mainPage += "\"></td></tr>\
-      <tr>\
-      <td><label for=\"mqttport\">MQTT Broker Port:</label></td>\
-      <td><input type=\"number\" min=\"0\" max=\"65535\" step=\"1\" name=\"mqttport\" style=\"width: 65px\;\" value=\"";
-  mainPage += String(mqttPort);
-  mainPage += "\"></td></tr>\
-      <tr>\
-      <td><label for=\"mqttuser\">MQTT User Name:</label></td>\
-      <td><input type=\"text\" name=\"mqttuser\" maxlength=\"64\" value=\"";
-  mainPage += mqttUser;
-  mainPage += "\"></td></tr>\
-      <tr>\
-      <td><label for=\"mqttpw\">MQTT Password:</label></td>\
-      <td><input type=\"password\" name=\"mqttpw\" maxlength=\"64\" value=\"";
-  mainPage += mqttPW;
-  mainPage += "\"></td></tr>\
-      <tr>\
-      <td><label for=\"mqtttopic\">MQTT Topic: &nbsp;&nbsp; stat/</label></td>\
-      <td><input type=\"text\" name=\"mqtttopic\" maxlength=\"16\" value=\"";
-  mainPage += mqttTopicPub;
-
-  mainPage += "\"> (16 alphanumeric chars max - no spaces, no symbols)</td></tr>\
-      <tr>\
-      <td><label for=\"mqttperiod\">Telemetry Period:</label></td>\
-      <td><input type=\"number\" min=\"60\" max=\"600\" step=\"1\" name=\"mqttperiod\" style=\"width: 50px\;\" value=\"";
-  mainPage += String(mqttTelePeriod);
-  mainPage += "\"> seconds (60 min, 600 max)</td></tr>\
-      <tr>\
-      <td><label for=\"discovery\">MQTT Discovery:</label></td>\
-      <td><a href=\"http://";
-  mainPage += baseIP;
-  mainPage += "/discovery\">Configure Home Assistant MQTT Discovery</a> (beta)";    
-  mainPage += "</td></tr>\
-      </table><br>\
-      <input type=\"checkbox\" name=\"chksave\" value=\"save\">Save all settings as new boot defaults (controller will reboot)<br><br>\
-      <input type=\"submit\" value=\"Update\">\
-    </form>\
-    <br>\
-    <h2>Controller Commands</h2>\
-    Caution: Restart and Reset are executed immediately when the button is clicked.<br>\
-    <table border=\"1\" cellpadding=\"10\">\
-    <tr>\
-    <td><button id=\"btnrestart\" onclick=\"location.href = './restart';\">Restart</button></td><td>This will reboot controller and reload default boot values.</td>\
-    </tr><tr>\
-    <td><button id=\"btnreset\" style=\"background-color:#FAADB7\" onclick=\"location.href = './reset';\">RESET ALL</button></td><td><b>WARNING</b>: This will clear all settings, including WiFi! You must complete initial setup again.</td>\
-    </tr><tr>\
-    <td><button id=\"btnupdate\" onclick=\"location.href = './update';\">Firmware Upgrade</button></td><td>Upload and apply new firmware from local file.</td>\
-    </tr></table><br>\
-    Current version: VAR_CURRRENT_VER\
-  </body>\
-</html>";
-  mainPage.replace("VAR_DEVICE_NAME", deviceName); 
-  mainPage.replace("VAR_CURRRENT_VER", VERSION);
-  mainPage.replace("VAR_WIFI_INFO", "WiFi: " + String(WiFi.RSSI()) + " dBm, AP " + WiFi.BSSIDstr() + ", ch " + String(WiFi.channel())
-    + " | MQTT: " + (client.connected() ? "connected" : "disconnected (state " + String(client.state()) + ")")
-    + " | PHY: 11" + String("?bgn"[WiFi.getPhyMode() & 3])
-    + " | Sleep: " + String(WiFi.getSleepMode()) + " | Max loop: " + String(loopMaxMs) + " ms"
-    + " | Uptime: " + String(millis() / 60000) + " min");
-  sendPage(mainPage);
+  p += "</div><div class=bar><span>Apply uses the new settings until the next restart. Save &amp; reboot makes them the boot defaults.</span>"
+       "<button type=submit>Apply</button><button type=submit name=chksave value=save class=pri>Save &amp; reboot</button></div></form></body></html>";
+  sendPage(p);
 }
 
-// Settings submit handler - Settings results
 void handleForm() {
   if (server.method() != HTTP_POST) {
     server.send(405, "text/plain", "Method Not Allowed");
@@ -583,10 +442,10 @@ void handleForm() {
       //UOM has changed. Convert distances
       if (tmpUOM) {
         //Was inches... convert to mm
-        wakeDistance = ((server.arg("wakedistance").toInt()) * 25.4);  
-        startDistance = ((server.arg("activedistance").toInt()) * 25.4);
-        parkDistance = ((server.arg("parkeddistance").toInt()) * 25.4);
-        backupDistance = ((server.arg("backupdistance").toInt()) * 25.4);
+        wakeDistance = ((server.arg("wakedistance").toFloat()) * 25.4);  
+        startDistance = ((server.arg("activedistance").toFloat()) * 25.4);
+        parkDistance = ((server.arg("parkeddistance").toFloat()) * 25.4);
+        backupDistance = ((server.arg("backupdistance").toFloat()) * 25.4);
        
       } else {
         //Was mm... just get server val
@@ -604,19 +463,14 @@ void handleForm() {
         backupDistance = (server.arg("backupdistance").toInt());
       } else {
         //convert all values to mm
-        wakeDistance = ((server.arg("wakedistance").toInt()) * 25.4);  
-        startDistance = ((server.arg("activedistance").toInt()) * 25.4);
-        parkDistance = ((server.arg("parkeddistance").toInt()) * 25.4);
-        backupDistance = ((server.arg("backupdistance").toInt()) * 25.4);
+        wakeDistance = ((server.arg("wakedistance").toFloat()) * 25.4);  
+        startDistance = ((server.arg("activedistance").toFloat()) * 25.4);
+        parkDistance = ((server.arg("parkeddistance").toFloat()) * 25.4);
+        backupDistance = ((server.arg("backupdistance").toFloat()) * 25.4);
       }
     }
     
     uomDistance = server.arg("uom").toInt();
-    //for displaying inches on page
-    uint16_t intWakeDistance = ((wakeDistance / 25.4) + 0.5);
-    uint16_t intStartDistance = ((startDistance / 25.4) + 0.5);
-    uint16_t intParkDistance = ((parkDistance / 25.4) + 0.5);
-    uint16_t intBackupDistance = ((backupDistance / 25.4) + 0.5);
     
     ledColorWake = ColorCodes[webColorWake];
     ledColorActive = ColorCodes[webColorActive];
@@ -639,77 +493,22 @@ void handleForm() {
     
     saveSettings = server.arg("chksave");
     
-    String message = "<html>\
-      </head>\
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\
-        <title>Parking Assistant - Current Settings</title>\
-        <style>\
-          body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }\
-        </style>\
-      </head>\
-      <body>\
-      <H1>Settings updated!</H1><br>\
-      <H3>Current values are:</H3>";
-    message += "Device Name: " + deviceName + "<br>";
-    message += "Num LEDs: " + server.arg("leds") + "<br>";
-    message += "Active Brightness: " + server.arg("activebrightness") + "<br>";
-    message += "Standby Brightness: " + server.arg("sleepbrightness") + "<br><br>";
-    message += "<b>LED active On Times</b><br><br>";
-    message += "Park Time: " + server.arg("ledparktime") + " secs.<br>";
-    message += "Exit Time: " + server.arg("ledexittime") + " secs.<br><br>";
-    if (uomDistance) {
-      message += "<b>Parking Distances milimeters (inches)</b><br><br>";
-      message += "Wake Distance: " + String(wakeDistance) + " (" + String(intWakeDistance) + ")<br>";
-      message += "Active Distance: " + String(startDistance) + " (" + String(intStartDistance) + ")<br>";
-      message += "Parked Distance: " + String(parkDistance) + " (" + String(intParkDistance) + ")<br>";
-      message += "Backup Distance: " + String(backupDistance) + " (" + String(intBackupDistance) + ")<br><br>";
-      
-    } else {
-      message += "<b>Parking Distances inches (millimeters)</b><br><br>";
-      message += "Wake Distance: " + String(intWakeDistance) + " (" + String(wakeDistance) + ")<br>";
-      message += "Active Distance: " + String(intStartDistance) + " (" + String(startDistance) + ")<br>";
-      message += "Parked Distance: " + String(intParkDistance) + " (" + String(parkDistance) + ")<br>";
-      message += "Backup Distance: " + String(intBackupDistance) + " (" + String(backupDistance) + ")<br><br>";
-//      message += "Backup Distance: " + server.arg("backupdistance") + " (" + String(backupDistance) + ")<br><br>";
-      
-    }
-    message += "<b>LED Colors and Effect</b>:<br><br>";
-    message += "Wake Color: " + WebColors[webColorWake] + "<br>";
-    message += "Active Color: " + WebColors[webColorActive] + "<br>";
-    message += "Parked Color: " + WebColors[webColorParked] + "<br>";
-    message += "Backup Color: " + WebColors[webColorBackup] + "<br>";
-    message += "Standby Color: " + WebColors[webColorStandby] +  "<br>";
-    message += "Effect: " + server.arg("effect1") + "<br><br>";
-    message += "<b>MQTT Settings</b><br><br>";
-    if ((mqttAddr_1 == 0) && (mqttAddr_2 == 0) && (mqttAddr_3) == 0 && (mqttAddr_4 == 0)) {
-      message += "MQTT: <b><u>Disabled</u></b> ";
-      if (saveSettings != "save") {
-        message += "(If you just changed MQTT settings, you must save as new boot defaults for this to take effect)<br>";
-      }
-    } else {
-      message += "MQTT Server: " + server.arg("mqttaddr1") + "." + server.arg("mqttaddr2") +  "." + server.arg("mqttaddr3") + "." + server.arg("mqttaddr4") + "<br>";
-      message += "MQTT Port: " + server.arg("mqttport") + "<br>";
-      message += "MQTT User: " + server.arg("mqttuser") + "<br>";
-      message += "MQTT Password: ***********<br>";
-      message += "MQTT Topic: stat/" + server.arg("mqtttopic") + "<br>";
-      message += "Telemetry Period: " + server.arg("mqttperiod") + " seconds<br>";
-      if (saveSettings != "save") {
-        message += "<br>(If you just changed MQTT settings, you must save as new boot defaults for this to take effect)<br>";
-      }
-    }
-    message += "<br>";
-    if (saveSettings == "save") {
-      message += "<br>";
-      message += "<b>New settings saved as boot defaults.</b> Controller will now reboot.<br>";
-      message += "You can return to the settings page after boot completes (lights will briefly turn blue then red/green to indicate completed boot).<br>";    
+    //Short confirmation page that returns to the settings page (after the reboot when saving)
+    bool saving = (saveSettings == "save");
+    String message = "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
+      "<meta http-equiv=refresh content=\"" + String(saving ? 20 : 2) + ";url=/\"><title>Settings updated</title>";
+    message += FPSTR(PAGE_CSS);
+    message += "</head><body><div class=card style=\"max-width:460px;margin:40px auto\">";
+    if (saving) {
+      message += "<h2>Saved. Rebooting...</h2><p>The new settings are now the boot defaults. This page returns to the settings in about 20 seconds "
+        "(the lights briefly turn blue, then red/green, when boot completes).</p>";
     } else {
       //Wake up system so new setting can be seen/tested... even if car present
       carDetectedCounter = carDetectedCounterMax + 1;
+      message += "<h2>Settings applied</h2><p>They are active until the next restart. Use <b>Save &amp; reboot</b> to keep them. "
+        "MQTT changes only take effect after saving.</p>";
     }
-    message += "<br><a href=\"http://";
-    message += baseIP;
-    message += "\">Return to settings</a><br>";
-    message += "</body></html>";
+    message += "<p><a href=\"/\">Back to settings</a></p></div></body></html>";
     sendPage(message);
     delay(1000);
     if (saveSettings == "save") {

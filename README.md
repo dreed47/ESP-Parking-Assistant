@@ -2,6 +2,10 @@
 
 ![Four_Bars_ExtraSmall](https://user-images.githubusercontent.com/55962781/202794373-1cdfc5d2-508c-4eeb-9bc8-bf75e5dc39d9.jpg)
 
+> **About this fork (`esp8266` branch):** upstream v0.60+ is ESP32-only. This branch keeps ESP8266 controllers going on patched v0.46: MQTT reconnects without freezing the controller, a WiFi watchdog, web pages that load reliably on a lossy link, and a redesigned settings page. See [src/README.md](src/README.md#building-this-fork-esp8266-v046-fixes) for build notes (ESP8266 core 2.7.4 only).
+>
+> ![Settings page](images/web-ui.png)
+
 A simple to build and use garage parking assistant using an ESP8266 and WS2812b LEDs.  Using a low cost Wemos D1 Mini, a short strip of around 20-40 WS2812b LED pixels and TFMini-s LIDAR distance sensor, a visual parking assistant system for putting your car in the same location in the garage each time can easily be created.
 
 ### Please see the [wiki](https://github.com/Resinchem/ESP-Parking-Assistant/wiki) for full details on installation, configuration, settings and options.

@@ -25,7 +25,7 @@
 #ifdef ESP32
   #include <SPIFFS.h>
 #endif
-#define VERSION "v0.46-dr3 (ESP8266)"
+#define VERSION "v0.46-dr6 (ESP8266)"
 
 // ================================
 //  User Defined values and options
@@ -108,6 +108,16 @@ uint32_t lastMqttRetry = 0;       //dr1: non-blocking MQTT reconnect timer
 uint32_t wifiLostAt = 0;          //dr1: when WiFi was first seen down (0 = connected)
 uint32_t loopStart = 0;           //dr3: diagnostics - longest loop pass (excluding final delay)
 uint32_t loopMaxMs = 0;
+uint32_t loopMaxAtMin = 0;        //uptime (min) when the longest loop pass happened
+uint32_t maxWebMs = 0;            //longest single server.handleClient()
+uint32_t maxMqttMs = 0;           //longest single MQTT connect attempt
+uint16_t mqttReconnects = 0;
+uint16_t wifiDrops = 0;           //station disconnect events since boot
+uint8_t lastDropReason = 0;       //WiFiDisconnectReason of the last drop
+uint32_t lastDropMin = 0;
+WiFiEventHandler wifiDropHandler;
+WiFiEventHandler wifiIpHandler;
+bool haDiscoveryOn = false;       //HA discovery enabled; flag file /hadisc so it survives reboots
 
 //Variables for creating unique entity IDs and topics (HA discovery)
 byte macAddr[6];               //Device MAC address (array is in reverse order)
@@ -284,10 +294,19 @@ a{color:var(--acc)}
 // server.client() returns a copy, so the timeout is set on (and the body written through) that copy.
 void sendPage(const String& page) {
   WiFiClient c = server.client();
-  c.setTimeout(20000);
   server.setContentLength(page.length());
   server.send(200, "text/html", "");
-  c.write(page.c_str(), page.length());
+  //Cap the whole body at 20s: write() waits per chunk, so a per-call timeout alone could stall the loop (and LEDs) far longer
+  const uint32_t budget = 20000;
+  uint32_t start = millis();
+  size_t sent = 0, len = page.length();
+  while (sent < len && millis() - start < budget) {
+    c.setTimeout(budget - (millis() - start));
+    //small pieces: one write() keeps waiting as long as ACKs trickle in, so the budget is only checked between calls
+    size_t n = c.write(page.c_str() + sent, min(len - sent, (size_t)536));
+    if (n == 0) break;
+    sent += n;
+  }
 }
 
 // One labelled number input row on the settings page
@@ -408,7 +427,10 @@ void handleRoot() {
        "use it to change WiFi or the device name.</p></details>";
   p += "<details><summary>Diagnostics</summary><p>AP " + WiFi.BSSIDstr() + ", channel " + String(WiFi.channel()) + ", 802.11" + String("?bgn"[WiFi.getPhyMode() & 3])
        + ", sleep mode " + String(WiFi.getSleepMode()) + "<br>IP " + baseIP + ", MAC " + strMacAddr
-       + "<br>Longest loop " + String(loopMaxMs) + " ms, free heap " + String(ESP.getFreeHeap()) + " bytes</p></details></div>";
+       + "<br>Longest loop " + String(loopMaxMs) + " ms at " + String(loopMaxAtMin) + " min uptime (web " + String(maxWebMs) + " ms, MQTT connect " + String(maxMqttMs) + " ms)"
+       + "<br>WiFi drops " + String(wifiDrops) + (wifiDrops ? " (last: reason " + String(lastDropReason) + " at " + String(lastDropMin) + " min)" : String(""))
+       + ", MQTT reconnects " + String(mqttReconnects) + ", HA discovery " + (haDiscoveryOn ? "on" : "off") + ", free heap " + String(ESP.getFreeHeap()) + " bytes"
+       + "<br>Last reset: " + ESP.getResetReason() + "</p></details></div>";
 
   p += "</div><div class=bar><span>Apply uses the new settings until the next restart. Save &amp; reboot makes them the boot defaults.</span>"
        "<button type=submit>Apply</button><button type=submit name=chksave value=save class=pri>Save &amp; reboot</button></div></form></body></html>";
@@ -813,6 +835,7 @@ void enableDiscovery() {
   if (mqttEnabled) {
     byte retVal = haDiscovery(true);
     if (retVal == 0) {
+      saveDiscoveryFlag(true);
 
       discMsg += "<b><p style=\"color: #5a8f3d;\">MQTT Discovery topics successfully sent to Home Assistant.</p></b><br>";
       discMsg += "If the Home Assistant MQTT integration has been configured correctly, you should now find a new device, <b>VAR_DEVICE_NAME</b>, under the MQTT integration.";
@@ -892,6 +915,7 @@ void disableDiscovery() {
   if (mqttEnabled) {
     byte retVal = haDiscovery(false);
     if (retVal == 0) {
+      saveDiscoveryFlag(false);
       discMsg += "<b><p style=\"color: #5a8f3d;\">MQTT Removal topics successfully sent to Home Assistant.</p></b><br>";
       discMsg += "The device <b>VAR_DEVICE_NAME</b> should now be deleted from Home Assistant, along with the following entities:\
         <ul>\
@@ -1007,6 +1031,7 @@ bool setup_mqtt() {
   client.publish(("stat/" + mqttTopicPub + "/ipaddress").c_str(), baseIP.c_str(), true);
   client.publish(("stat/" + mqttTopicPub + "/macaddress").c_str(), strMacAddr.c_str(), true);
   mqttConnected = true;
+  if (haDiscoveryOn) haDiscovery(true);  //broker may have lost the retained discovery configs
   return true;
 }
 
@@ -1016,8 +1041,14 @@ void reconnect() {
   if (client.connected() || WiFi.status() != WL_CONNECTED) return;
   if (millis() - lastMqttRetry < 5000) return;
   lastMqttRetry = millis();
-  if (client.connect(mqttClient.c_str(), mqttUser.c_str(), mqttPW.c_str())) {
+  uint32_t t = millis();
+  bool ok = client.connect(mqttClient.c_str(), mqttUser.c_str(), mqttPW.c_str());
+  if (millis() - t > maxMqttMs) maxMqttMs = millis() - t;
+  if (ok) {
+    mqttReconnects++;
     client.subscribe(("cmnd/" + mqttTopicSub + "/#").c_str());
+    client.publish(("stat/" + mqttTopicPub + "/mqtt").c_str(), "connected", true);
+    if (haDiscoveryOn) haDiscovery(true);  //broker may have lost the retained discovery configs
   }
 }
 
@@ -1178,6 +1209,10 @@ void setup() {
     Serial.println("mounting FS...");
   #endif
   readConfigFile();
+  if (SPIFFS.begin()) {
+    haDiscoveryOn = SPIFFS.exists("/hadisc");
+    SPIFFS.end();
+  }
 
   // The extra parameters to be configured (can be either global or just in the setup)
   // After connecting, parameter.getValue() will get you the configured value
@@ -1209,7 +1244,14 @@ void setup() {
   //If not supplied, will use ESP + last 7 digits of MAC
   //and goes into a blocking loop awaiting configuration. If a password
   //is desired for the AP, add it after the AP name (e.g. autoConnect("MyApName", "12345678")
-  if (!wifiManager.autoConnect("ESP_ParkingAsst")) {  //
+  //With WiFi already saved, never block in the setup portal (the parking LEDs don't run there):
+  //try for 30s, then boot anyway and let the loop's WiFi watchdog keep reconnecting
+  bool haveWifiCreds = WiFi.SSID().length() > 0;
+  if (haveWifiCreds) {
+    wifiManager.setEnableConfigPortal(false);
+    wifiManager.setConnectTimeout(30);
+  }
+  if (!wifiManager.autoConnect("ESP_ParkingAsst") && !haveWifiCreds) {
     #if defined(SERIAL_DEBUG) && (SERIAL_DEBUG == 1)
       Serial.println("failed to connect and hit timeout");
     #endif
@@ -1232,6 +1274,14 @@ void setup() {
   //if you get here you have connected to the WiFi
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.setAutoReconnect(true);
+  wifiIpHandler = WiFi.onStationModeGotIP([](const WiFiEventStationModeGotIP& e) {
+    baseIP = e.ip.toString();  //boot may have finished before WiFi connected
+  });
+  wifiDropHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) {
+    wifiDrops++;
+    lastDropReason = e.reason;
+    lastDropMin = millis() / 60000;
+  });
   //dr2: 802.11g + lower TX power. 11n on the ESP8266 drops packets with some modern APs,
   //and full power (20.5 dBm) is unnecessary near an AP and adds supply current spikes.
   WiFi.setPhyMode(WIFI_PHY_MODE_11G);
@@ -1359,10 +1409,9 @@ void setup() {
   // =====================
 
   if (mqttEnabled) {
-    //Attempt to connect to MQTT broker - if fails, disable MQTT
-    if (!setup_mqtt()) {
-      mqttEnabled = false;
-    }
+    //Attempt to connect to MQTT broker - if it fails, reconnect() in the loop keeps retrying
+    //(was: MQTT disabled until the next reboot)
+    setup_mqtt();
   }
   
   //-----------------------------
@@ -1449,7 +1498,9 @@ void loop() {
   }
 
   //Handle any web calls
+  uint32_t webStart = millis();
   server.handleClient();
+  if (millis() - webStart > maxWebMs) maxWebMs = millis() - webStart;
 
   //Handle MQTT calls (if enabled)
   if (mqttEnabled) {
@@ -1593,7 +1644,10 @@ void loop() {
       client.publish(("stat/" + mqttTopicPub + "/parkdistance").c_str(), outMsg, true);
     }
   }
-  if (millis() - loopStart > loopMaxMs) loopMaxMs = millis() - loopStart;
+  if (millis() - loopStart > loopMaxMs) {
+    loopMaxMs = millis() - loopStart;
+    loopMaxAtMin = millis() / 60000;
+  }
   delay(200);
 }
 
@@ -1733,6 +1787,23 @@ void createUniqueId() {
   #endif
 }
 
+
+//Remember whether HA discovery is enabled, so it can be republished on every MQTT connect
+void saveDiscoveryFlag(bool on) {
+  if (SPIFFS.begin()) {
+    if (on) {
+      File f = SPIFFS.open("/hadisc", "w");
+      if (f) {
+        f.print("1");
+        f.close();
+      }
+    } else {
+      SPIFFS.remove("/hadisc");
+    }
+    SPIFFS.end();
+  }
+  haDiscoveryOn = on;
+}
 
 byte haDiscovery (bool enable) {
   char topic[128];

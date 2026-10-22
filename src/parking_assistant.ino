@@ -25,7 +25,7 @@
 #ifdef ESP32
   #include <SPIFFS.h>
 #endif
-#define VERSION "v0.46-dr6 (ESP8266)"
+#define VERSION "v0.46-dr8 (ESP8266)"
 
 // ================================
 //  User Defined values and options
@@ -266,7 +266,7 @@ void defineColors() {
 // Web pages and handlers
 //===============================
 // Shared page style: compact card grid, follows the browser's light/dark setting
-const char PAGE_CSS[] PROGMEM = R"(<style>
+const char PAGE_CSS[] PROGMEM = R"(
 :root{--bg:#f3f4f6;--card:#fff;--fg:#1f2937;--mut:#6b7280;--bd:#d1d5db;--acc:#2563eb;--ok:#15803d;--bad:#dc2626}
 @media(prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--fg:#e5e7eb;--mut:#9ca3af;--bd:#374151;--acc:#60a5fa;--ok:#4ade80;--bad:#f87171}}
 *{box-sizing:border-box}
@@ -284,10 +284,44 @@ input,select,button{font:inherit;color:var(--fg);background:var(--bg);border:1px
 input[type=number]{width:84px}input[type=text],input[type=password]{width:150px}select{width:120px}
 .ip input{width:54px}
 details{margin-top:8px;font-size:12px;color:var(--mut)}summary{cursor:pointer;color:var(--acc)}details p{margin:4px 0}
-button{cursor:pointer;padding:6px 12px}.pri{background:var(--acc);color:#fff;border:0}.dng{border-color:var(--bad);color:var(--bad)}
+button{cursor:pointer;padding:6px 12px;white-space:nowrap}.pri{background:var(--acc);color:#fff;border:0}.dng{border-color:var(--bad);color:var(--bad)}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;margin-top:12px}.bar span{flex:1;color:var(--mut);font-size:12px}
-a{color:var(--acc)}
-</style>)";
+a{color:var(--acc)}label[title]{cursor:help;text-decoration:underline dotted;text-underline-offset:3px})";
+
+// Hover help for each setting, served as a cached script so it costs no page memory.
+// Keys are input ids; the matching <label for=...> gets the text as a tooltip.
+const char HELP_JS[] PROGMEM = R"(var H={
+leds:"Number of LEDs on your strip (1-100). Set it to match the strip or the effects will be off.",
+activebrightness:"LED brightness while a car is being guided in (0-255).",
+sleepbrightness:"Brightness of the standby lights when no car is moving (0-255). 0 turns the strip fully off when idle.",
+ledparktime:"Seconds the LEDs stay lit after a car parks before dropping to standby (0-300).",
+ledexittime:"Seconds the LEDs stay lit after a car leaves before dropping to standby (0-300).",
+uom0:"Units for the distance boxes. Switching converts the current values when you Apply or Save.",
+wakedistance:"Distance from the sensor where the strip wakes up as a car approaches. Must be the largest distance.",
+activedistance:"Distance where the approach countdown effect starts. Must be less than Wake.",
+parkeddistance:"Distance where the car is in its parked spot; the strip shows the Parked color. Must be less than Active.",
+backupdistance:"If the car gets closer than this, the strip flashes the Back up color. Must be the smallest distance.",
+wakecolor:"Color shown when a car enters the wake zone.",
+activecolor:"Color of the countdown effect as the car approaches.",
+parkedcolor:"Color shown when the car reaches the parked position.",
+backupcolor:"Flashing color shown when the car has pulled in too far.",
+standbycolor:"Color of the two end LEDs while idle (uses Standby brightness).",
+effect1:"How the countdown is drawn: Out-In fills from both ends toward the middle, In-Out from the middle outward, Full-Strip fills from the start of the strip, Full-Strip-Inv from the end, Solid lights the whole strip.",
+mqttaddr1:"IP address of your MQTT broker. Set to 0.0.0.0 to disable MQTT. Takes effect after Save & reboot.",
+mqttport:"MQTT broker port, usually 1883.",
+mqttuser:"User name for your MQTT broker.",
+mqttpw:"Password for your MQTT broker.",
+mqtttopic:"Topic name: status is published under stat/<topic>/ and commands are read from cmnd/<topic>/. Letters and numbers only, 16 max.",
+mqttperiod:"How often (60-600 s) car presence and distance are published to MQTT. A car arriving or leaving is also sent immediately."
+};
+for(var k in H){var l=document.querySelector('label[for="'+k+'"]');if(l)l.title=H[k];})";
+
+// <link> to the cached stylesheet; the query changes with each build so a firmware update refreshes it
+String cssLink() {
+  static String v = String(ESP.getSketchSize());
+  static String link = "<link rel=stylesheet href=\"/s.css?v=" + v + "\"><script defer src=\"/h.js?v=" + v + "\"></script>";
+  return link;
+}
 
 // Send a page with a long write timeout. On lossy WiFi a lost segment's retransmit can exceed
 // the web server's fixed 5s per-chunk timeout, which silently truncates the page.
@@ -324,6 +358,128 @@ String selRow(const char* label, const char* name, String* opts, int count, int 
   return s + "</select></div>";
 }
 
+// ===============================
+//  Settings export / import
+// ===============================
+// Every key in /config.json with the size of the buffer readConfigFile() strcpy's it into.
+// Imports are checked against this list so a bad file can't overflow a buffer and boot-loop the controller.
+struct CfgKey { const char* key; uint8_t size; };
+const CfgKey cfgKeys[] = {
+  {"led_count", sizeof(led_count)}, {"led_park_time", sizeof(led_park_time)}, {"led_exit_time", sizeof(led_exit_time)},
+  {"led_brightness_active", sizeof(led_brightness_active)}, {"led_brightness_sleep", sizeof(led_brightness_sleep)},
+  {"uom_distance", sizeof(uom_distance)}, {"wake_mils", sizeof(wake_mils)}, {"start_mils", sizeof(start_mils)},
+  {"park_mils", sizeof(park_mils)}, {"backup_mils", sizeof(backup_mils)},
+  {"color_standby", sizeof(color_standby)}, {"color_wake", sizeof(color_wake)}, {"color_active", sizeof(color_active)},
+  {"color_parked", sizeof(color_parked)}, {"color_backup", sizeof(color_backup)}, {"led_effect", sizeof(led_effect)},
+  {"mqtt_addr_1", sizeof(mqtt_addr_1)}, {"mqtt_addr_2", sizeof(mqtt_addr_2)}, {"mqtt_addr_3", sizeof(mqtt_addr_3)},
+  {"mqtt_addr_4", sizeof(mqtt_addr_4)}, {"mqtt_port", sizeof(mqtt_port)}, {"mqtt_tele_period", sizeof(mqtt_tele_period)},
+  {"mqtt_user", sizeof(mqtt_user)}, {"mqtt_pw", sizeof(mqtt_pw)}, {"device_name", sizeof(device_name)},
+  {"mqtt_topic_sub", sizeof(mqtt_topic_sub)}, {"mqtt_topic_pub", sizeof(mqtt_topic_pub)}
+};
+String importBuf;
+bool importTooBig = false;
+
+// Short styled page used for import results
+void sendNotice(const String& title, const String& body, int refreshSecs) {
+  String m = "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">";
+  if (refreshSecs > 0) m += "<meta http-equiv=refresh content=\"" + String(refreshSecs) + ";url=/\">";
+  m += "<title>" + title + "</title>";
+  m += cssLink();
+  m += "</head><body><div class=card style=\"max-width:460px;margin:40px auto\"><h2>" + title + "</h2><p>" + body + "</p><p><a href=\"/\">Back to settings</a></p></div></body></html>";
+  sendPage(m);
+}
+
+// Download the saved boot settings (not unsaved "Apply" changes). WiFi credentials are not in this file.
+void handleExport() {
+  String cfg;
+  if (SPIFFS.begin()) {
+    File f = SPIFFS.open("/config.json", "r");
+    if (f) {
+      cfg = f.readString();
+      f.close();
+    }
+    SPIFFS.end();
+  }
+  if (cfg.length() == 0) {
+    sendNotice("Nothing to export", "No saved settings yet. Use <b>Save &amp; reboot</b> first.", 0);
+    return;
+  }
+  server.sendHeader("Content-Disposition", "attachment; filename=\"" + deviceName + "-settings.json\"");
+  server.send(200, "application/json", cfg);
+}
+
+// Collects the uploaded file (small JSON only)
+void handleImportUpload() {
+  HTTPUpload& up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    importBuf = "";
+    importTooBig = false;
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (importBuf.length() + up.currentSize > 2048) {
+      importTooBig = true;
+    } else {
+      importBuf.concat((const char*)up.buf, up.currentSize);
+    }
+  }
+}
+
+// Returns "" if the settings JSON is safe to load, otherwise the reason it was rejected
+String validateImport(JsonDocument& in) {
+  for (const CfgKey& k : cfgKeys) {
+    JsonVariant v = in[k.key];
+    if (v.isNull()) return String("missing setting \"") + k.key + "\"";
+    if (!v.is<const char*>()) return String("\"") + k.key + "\" must be a text value";
+    if (strlen(v.as<const char*>()) >= k.size) return String("\"") + k.key + "\" is too long (max " + (k.size - 1) + " characters)";
+  }
+  //Values used as array sizes/indexes must be in range
+  int leds = atoi(in["led_count"]);
+  if (leds < 1 || leds > NUM_LEDS_MAX) return "led_count must be 1-" + String(NUM_LEDS_MAX);
+  const char* colors[] = {"color_standby", "color_wake", "color_active", "color_parked", "color_backup"};
+  for (const char* c : colors) {
+    const char* s = in[c];
+    if (!isdigit(s[0]) || atoi(s) >= numberOfColors) return String("\"") + c + "\" must be 0-" + (numberOfColors - 1);
+  }
+  bool effectOk = false;
+  for (int i = 0; i < numberOfEffects; i++) if (Effects[i] == in["led_effect"].as<const char*>()) effectOk = true;
+  if (!effectOk) return "unknown led_effect";
+  return "";
+}
+
+void handleImport() {
+  if (importTooBig) {
+    importBuf = "";
+    sendNotice("Import failed", "That file is too large to be a settings file.", 0);
+    return;
+  }
+  DynamicJsonDocument in(1536);
+  DeserializationError err = deserializeJson(in, importBuf);
+  importBuf = "";
+  String problem = err ? String("not a valid settings file (") + err.c_str() + ")" : validateImport(in);
+  if (problem.length()) {
+    sendNotice("Import failed", "Nothing was changed: " + problem + ".", 0);
+    return;
+  }
+  //Write a clean copy containing only the known keys
+  DynamicJsonDocument out(1024);
+  for (const CfgKey& k : cfgKeys) out[k.key] = in[k.key].as<const char*>();
+  bool saved = false;
+  if (SPIFFS.begin()) {
+    File f = SPIFFS.open("/config.json", "w");
+    if (f) {
+      saved = serializeJson(out, f) > 0;
+      f.close();
+    }
+    SPIFFS.end();
+  }
+  if (!saved) {
+    sendNotice("Import failed", "Could not write the settings file. Current settings are unchanged.", 0);
+    return;
+  }
+  sendNotice("Settings imported", "Rebooting with the imported settings. This page returns to the settings in about 20 seconds.", 20);
+  delay(1000);
+  ESP.restart();
+}
+
 // Main Settings page
 // Root / Main Settings page handler
 void handleRoot() {
@@ -350,9 +506,15 @@ void handleRoot() {
   const char* dUnit = uomDistance ? "mm" : "in";
 
   String p;
-  p.reserve(9000);
-  p = "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>" + deviceName + " - Parking Assistant</title>";
-  p += FPSTR(PAGE_CSS);
+  //Reserve the whole page up front: if the String has to grow later on a fragmented heap,
+  //appends fail silently and parts of the page (even form fields) go missing
+  const size_t pageMax = 10000;
+  if (!p.reserve(pageMax)) {
+    server.send(503, "text/plain", "Controller is low on memory - please reload in a few seconds.");
+    return;
+  }
+  p += "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>" + deviceName + " - Parking Assistant</title>";
+  p += cssLink();
   p += "</head><body><header><h1>Parking Assistant <span style=\"color:var(--mut);font-weight:normal\">" + deviceName + "</span></h1>";
   p += "<span class=chip>WiFi <b class=" + String(rssi > -70 ? "ok" : "bad") + ">" + rssi + " dBm</b></span>";
   if (!mqttEnabled) {
@@ -379,7 +541,7 @@ void handleRoot() {
 
   //Distances
   p += "<div class=card><h2>Parking distances</h2>";
-  p += "<div class=r><label>Units</label><span><label><input type=radio name=uom value=0" + String(uomDistance ? "" : " checked") + "> in</label> "
+  p += "<div class=r><label for=uom0>Units</label><span><label><input type=radio id=uom0 name=uom value=0" + String(uomDistance ? "" : " checked") + "> in</label> "
        "<label><input type=radio name=uom value=1" + String(uomDistance ? " checked" : "") + "> mm</label></span></div>";
   p += numRow("Wake", "wakedistance", dMin, dMax, dStep, String(intWakeDistance), dUnit);
   p += numRow("Active (countdown)", "activedistance", dMin, dMax, dStep, String(intStartDistance), dUnit);
@@ -423,8 +585,12 @@ void handleRoot() {
        "<button type=button onclick=\"confirm('Restart the controller?')&&(location='/restart')\">Restart</button>"
        "<button type=button onclick=\"location='/update'\">Firmware update</button>"
        "<button type=button class=dng onclick=\"confirm('Erase ALL settings, including WiFi? You will have to set the controller up again.')&&(location='/reset')\">Reset all</button></div>";
+  p += "<div class=bar style=\"justify-content:flex-start;margin:8px 0 0\"><button type=button onclick=\"location='/export'\">Export</button>"
+       "<input type=file name=f accept=\".json,application/json\" form=imp required style=\"flex:1;min-width:0\">"
+       "<button type=submit form=imp>Import</button></div>";
   p += "<details><summary>Help</summary><p><b>Restart</b> reboots and reloads the saved boot settings. <b>Reset all</b> erases everything, including WiFi; "
-       "use it to change WiFi or the device name.</p></details>";
+       "use it to change WiFi or the device name.</p><p><b>Export</b> downloads the saved settings (including the MQTT password, not WiFi). "
+       "<b>Import</b> replaces them with a previously exported file and reboots.</p></details>";
   p += "<details><summary>Diagnostics</summary><p>AP " + WiFi.BSSIDstr() + ", channel " + String(WiFi.channel()) + ", 802.11" + String("?bgn"[WiFi.getPhyMode() & 3])
        + ", sleep mode " + String(WiFi.getSleepMode()) + "<br>IP " + baseIP + ", MAC " + strMacAddr
        + "<br>Longest loop " + String(loopMaxMs) + " ms at " + String(loopMaxAtMin) + " min uptime (web " + String(maxWebMs) + " ms, MQTT connect " + String(maxMqttMs) + " ms)"
@@ -433,7 +599,13 @@ void handleRoot() {
        + "<br>Last reset: " + ESP.getResetReason() + "</p></details></div>";
 
   p += "</div><div class=bar><span>Apply uses the new settings until the next restart. Save &amp; reboot makes them the boot defaults.</span>"
-       "<button type=submit>Apply</button><button type=submit name=chksave value=save class=pri>Save &amp; reboot</button></div></form></body></html>";
+       "<button type=submit>Apply</button><button type=submit name=chksave value=save class=pri>Save &amp; reboot</button></div></form>"
+       "<form id=imp method=post action=\"/import\" enctype=\"multipart/form-data\" onsubmit=\"return confirm('Replace the saved settings with this file and reboot?')\"></form></body></html>";
+  if (p.length() >= pageMax) {
+    //outgrew the reservation, so an append may have failed: never serve a form that might be missing fields
+    server.send(503, "text/plain", "Settings page too large for this build - please report.");
+    return;
+  }
   sendPage(p);
 }
 
@@ -519,7 +691,7 @@ void handleForm() {
     bool saving = (saveSettings == "save");
     String message = "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
       "<meta http-equiv=refresh content=\"" + String(saving ? 20 : 2) + ";url=/\"><title>Settings updated</title>";
-    message += FPSTR(PAGE_CSS);
+    message += cssLink();
     message += "</head><body><div class=card style=\"max-width:460px;margin:40px auto\">";
     if (saving) {
       message += "<h2>Saved. Rebooting...</h2><p>The new settings are now the boot defaults. This page returns to the settings in about 20 seconds "
@@ -1388,6 +1560,20 @@ void setup() {
   server.on("/discoveryEnabled", enableDiscovery);
 
   server.on("/discoveryDisabled", disableDiscovery);
+
+  server.on("/export", handleExport);
+
+  server.on("/h.js", []() {
+    server.sendHeader("Cache-Control", "max-age=31536000");
+    server.send_P(200, "application/javascript", HELP_JS);
+  });
+
+  server.on("/s.css", []() {
+    server.sendHeader("Cache-Control", "max-age=31536000");
+    server.send_P(200, "text/css", PAGE_CSS);
+  });
+
+  server.on("/import", HTTP_POST, handleImport, handleImportUpload);
 
   server.on("/otaupdate",[]() {
     //Called directly from browser address (//ip_address/otaupdate) to put controller in ota mode for uploadling from Arduino IDE
